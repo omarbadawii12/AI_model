@@ -49,12 +49,21 @@ WHITELIST = [
 ]
 
 # ==================================================
+# Known Safe TLDs
+# ==================================================
+SAFE_TLDS = [
+    "com", "org", "net", "edu", "gov",
+    "io", "co.uk", "co.eg", "com.au", "co.jp"
+]
+
+# ==================================================
 # Suspicious TLDs
 # ==================================================
 SUSPICIOUS_TLDS = [
     "info", "xyz", "top", "club", "online",
     "site", "tk", "ml", "ga", "cf", "gq",
-    "pw", "cc", "biz"
+    "pw", "cc", "biz", "co", "ru", "cn",
+    "su", "ws", "in", "mobi", "name"
 ]
 
 # ==================================================
@@ -66,12 +75,26 @@ def check_https_status(url):
     }
 
 # ==================================================
-# Blacklist Check - UPGRADED
+# Valid URL Check
+# ==================================================
+def is_valid_url(url):
+    extracted = tldextract.extract(url)
+    # لازم يكون عنده domain وsuffix (TLD)
+    if not extracted.domain or not extracted.suffix:
+        return False
+    # لازم الـ suffix يكون على الأقل حرفين
+    if len(extracted.suffix) < 2:
+        return False
+    return True
+
+# ==================================================
+# Blacklist Check
 # ==================================================
 def check_blacklist(url):
     extracted = tldextract.extract(url)
     domain = extracted.registered_domain.lower()
     full_url = url.lower()
+    suffix = extracted.suffix.lower() if extracted.suffix else ""
 
     suspicious_words = [
         "login", "secure", "verify", "update",
@@ -97,20 +120,27 @@ def check_blacklist(url):
         }
 
     # 3. TLD مشبوه
-    if extracted.suffix and extracted.suffix.lower() in SUSPICIOUS_TLDS:
+    if suffix in SUSPICIOUS_TLDS:
         return {
             "blacklisted": True,
-            "matched": f"Suspicious TLD: .{extracted.suffix}"
+            "matched": f"Suspicious TLD: .{suffix}"
         }
 
-    # 4. دومين طويل جداً
+    # 4. TLD غير معروف (مش في الـ safe list)
+    if suffix and suffix not in SAFE_TLDS:
+        return {
+            "blacklisted": True,
+            "matched": f"Unknown/untrusted TLD: .{suffix}"
+        }
+
+    # 5. دومين طويل جداً
     if len(domain) > 30:
         return {
             "blacklisted": True,
             "matched": f"Suspicious long domain ({len(domain)} chars)"
         }
 
-    # 5. IP address بدل domain
+    # 6. IP address بدل domain
     ip_pattern = re.compile(r'https?://(\d{1,3}\.){3}\d{1,3}')
     if ip_pattern.match(url):
         return {
@@ -118,19 +148,19 @@ def check_blacklist(url):
             "matched": "IP address used instead of domain"
         }
 
-    # 6. @ في الـ URL
+    # 7. @ في الـ URL
     if "@" in url:
         return {
             "blacklisted": True,
             "matched": "@ symbol found in URL"
         }
 
-    # 7. Subdomains كتير
+    # 8. Subdomains كتير
     subdomain = extracted.subdomain
     if subdomain and subdomain.count(".") >= 3:
         return {
             "blacklisted": True,
-            "matched": f"Too many subdomains"
+            "matched": "Too many subdomains"
         }
 
     return {
@@ -220,10 +250,26 @@ def hybrid_decision(url):
     domain_full = extracted.registered_domain.lower()
 
     https_info = check_https_status(url)
-    blacklist_info = check_blacklist(url)
     redirect_info = check_redirects(url)
 
-    # Whitelist
+    # 1. URL مش valid خالص
+    if not is_valid_url(url):
+        return {
+            "url": url,
+            "score": 5,
+            "risk_level": "Malicious",
+            "status_icon": "🔴",
+            "details": {
+                "HTTPS": {"uses_https": "Yes" if https_info["uses_https"] else "No"},
+                "Blacklist": {"blacklisted": "Yes", "matched": "Invalid or incomplete URL"},
+                "Redirects": redirect_info
+            },
+            "final_verdict": "Malicious"
+        }
+
+    blacklist_info = check_blacklist(url)
+
+    # 2. Whitelist
     if domain_full in WHITELIST:
         return {
             "url": url,
@@ -238,7 +284,7 @@ def hybrid_decision(url):
             "final_verdict": "Safe"
         }
 
-    # Force Malicious
+    # 3. Force Malicious
     if not https_info["uses_https"] or blacklist_info["blacklisted"]:
         return {
             "url": url,
@@ -256,11 +302,11 @@ def hybrid_decision(url):
             "final_verdict": "Malicious"
         }
 
-    # Threat Intelligence
+    # 4. Threat Intelligence
     vt_res = check_virustotal(url).lower()
     uh_res = check_urlhaus(url).lower()
 
-    # ML Prediction
+    # 5. ML Prediction
     ml_res = "Safe"
     if ml_model:
         try:
@@ -271,7 +317,7 @@ def hybrid_decision(url):
         except:
             pass
 
-    # Score Engine
+    # 6. Score Engine
     score = 99
 
     if vt_res == "malicious":
@@ -295,7 +341,7 @@ def hybrid_decision(url):
     if score < 0:
         score = 0
 
-    # Final Verdict
+    # 7. Final Verdict
     if score > 70:
         risk = "Safe"
         icon = "🟢"
