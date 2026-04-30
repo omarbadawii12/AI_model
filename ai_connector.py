@@ -1,369 +1,195 @@
-import os
-import re
-import math
-import pickle
 import requests
-import numpy as np
 import tldextract
+import math
+import random
+import re
 
-from urllib.parse import urlparse
 
-# ==================================================
-# External Threat Sources
-# ==================================================
-try:
-    from virustotal_checker import check_virustotal
-except:
-    def check_virustotal(url):
-        return "safe"
+def normalize_domain(url):
+    ext = tldextract.extract(url)
+    return f"{ext.domain}.{ext.suffix}".lower()
 
-try:
-    from urlhaus_checker import check_urlhaus
-except:
-    def check_urlhaus(url):
-        return "safe"
 
-# ==================================================
-# Paths
-# ==================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ML_PATH = os.path.join(BASE_DIR, "model.pkl")
+WHITELIST = {
+    "facebook.com",
+    "github.com",
+    "google.com",
+    "microsoft.com",
+    "apple.com",
+    "linkedin.com",
+    "tripadvisor.com"
+}
 
-# ==================================================
-# Load ML Model
-# ==================================================
-try:
-    with open(ML_PATH, "rb") as f:
-        ml_model = pickle.load(f)
-except:
-    ml_model = None
+def url_entropy(text):
+    if not text:
+        return 0
+    prob = [text.count(c) / len(text) for c in set(text)]
+    return -sum(p * math.log2(p) for p in prob if p > 0)
 
-# ==================================================
-# Trusted Domains
-# ==================================================
-WHITELIST = [
-    "facebook.com", "google.com", "github.com",
-    "microsoft.com", "apple.com", "linkedin.com",
-    "tripadvisor.com", "youtube.com", "twitter.com",
-    "instagram.com", "amazon.com", "wikipedia.org"
-]
 
-# ==================================================
-# Known Safe TLDs
-# ==================================================
-SAFE_TLDS = [
-    "com", "org", "net", "edu", "gov",
-    "io", "co.uk", "co.eg", "com.au", "co.jp"
-]
+def is_suspicious_domain(domain):
 
-# ==================================================
-# Suspicious TLDs
-# ==================================================
-SUSPICIOUS_TLDS = [
-    "info", "xyz", "top", "club", "online",
-    "site", "tk", "ml", "ga", "cf", "gq",
-    "pw", "cc", "biz", "co", "ru", "cn",
-    "su", "ws", "in", "mobi", "name"
-]
+    if re.search(r'\d{3,}', domain):
+        return True
 
-# ==================================================
-# HTTPS Check
-# ==================================================
-def check_https_status(url):
-    return {
-        "uses_https": url.lower().startswith("https://")
-    }
+    if re.fullmatch(r'[a-z0-9]{10,}', domain):
+        return True
 
-# ==================================================
-# Valid URL Check
-# ==================================================
-def is_valid_url(url):
-    extracted = tldextract.extract(url)
-    # لازم يكون عنده domain وsuffix (TLD)
-    if not extracted.domain or not extracted.suffix:
-        return False
-    # لازم الـ suffix يكون على الأقل حرفين
-    if len(extracted.suffix) < 2:
-        return False
-    return True
+    if url_entropy(domain) > 3.5:
+        return True
 
-# ==================================================
-# Blacklist Check
-# ==================================================
-def check_blacklist(url):
-    extracted = tldextract.extract(url)
-    domain = extracted.registered_domain.lower()
-    full_url = url.lower()
-    suffix = extracted.suffix.lower() if extracted.suffix else ""
+    patterns = ["login", "secure", "verify", "bank", "update"]
+    return any(p in domain for p in patterns)
 
-    suspicious_words = [
-        "login", "secure", "verify", "update",
-        "bank", "paypal", "account", "signin",
-        "password", "confirm", "support", "alert",
-        "suspend", "unlock", "recover", "billing"
-    ]
 
-    # 1. كلمات مشبوهة في الدومين
-    for word in suspicious_words:
-        if word in domain:
-            return {
-                "blacklisted": True,
-                "matched": f"Suspicious keyword in domain: {word}"
-            }
+def is_lookalike(domain):
 
-    # 2. أكتر من كلمة مشبوهة في الـ URL
-    suspicious_count = sum(1 for word in suspicious_words if word in full_url)
-    if suspicious_count >= 2:
-        return {
-            "blacklisted": True,
-            "matched": f"Multiple suspicious keywords ({suspicious_count} found)"
-        }
+    brands = ["google", "facebook", "github", "apple", "microsoft", "linkedin"]
 
-    # 3. TLD مشبوه
-    if suffix in SUSPICIOUS_TLDS:
-        return {
-            "blacklisted": True,
-            "matched": f"Suspicious TLD: .{suffix}"
-        }
+    for b in brands:
+        if b in domain and domain != b:
+            return True
 
-    # 4. TLD غير معروف (مش في الـ safe list)
-    if suffix and suffix not in SAFE_TLDS:
-        return {
-            "blacklisted": True,
-            "matched": f"Unknown/untrusted TLD: .{suffix}"
-        }
+    return False
 
-    # 5. دومين طويل جداً
-    if len(domain) > 30:
-        return {
-            "blacklisted": True,
-            "matched": f"Suspicious long domain ({len(domain)} chars)"
-        }
 
-    # 6. IP address بدل domain
-    ip_pattern = re.compile(r'https?://(\d{1,3}\.){3}\d{1,3}')
-    if ip_pattern.match(url):
-        return {
-            "blacklisted": True,
-            "matched": "IP address used instead of domain"
-        }
+def is_new_domain(domain):
+    return domain.endswith((".xyz", ".top", ".info", ".site", ".click"))
 
-    # 7. @ في الـ URL
-    if "@" in url:
-        return {
-            "blacklisted": True,
-            "matched": "@ symbol found in URL"
-        }
 
-    # 8. Subdomains كتير
-    subdomain = extracted.subdomain
-    if subdomain and subdomain.count(".") >= 3:
-        return {
-            "blacklisted": True,
-            "matched": "Too many subdomains"
-        }
-
-    return {
-        "blacklisted": False,
-        "matched": None
-    }
-
-# ==================================================
-# Redirect Check
-# ==================================================
 def check_redirects(url):
-    result = {
-        "redirect_count": 0,
-        "redirect_chain": [url],
-        "final_url": url,
-        "suspicious": False,
-        "note": ""
-    }
 
     try:
-        resp = requests.get(
+        session = requests.Session()
+
+        resp = session.get(
             url,
-            timeout=6,
+            timeout=8,
             allow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0"}
         )
 
-        chain = [r.url for r in resp.history] + [resp.url]
-        result["redirect_chain"] = chain
-        result["redirect_count"] = len(resp.history)
-        result["final_url"] = resp.url
-
-        if len(resp.history) > 2:
-            result["suspicious"] = True
-            result["note"] = "Long redirect chain"
-
-        if resp.history:
-            origin = tldextract.extract(url).registered_domain
-            final = tldextract.extract(resp.url).registered_domain
-            if origin != final:
-                result["suspicious"] = True
-                result["note"] += " | Cross-domain redirect"
-
-    except:
-        pass
-
-    return result
-
-# ==================================================
-# Feature Engineering
-# ==================================================
-def url_entropy(url):
-    prob = [float(url.count(c)) / len(url) for c in set(url)]
-    return -sum([p * math.log2(p) for p in prob if p > 0])
-
-def extract_features(url):
-    features = []
-    features.append(len(url))
-    features.append(url.count("."))
-    features.append(1 if "https" in url.lower() else 0)
-    features.append(1 if "@" in url else 0)
-
-    suspicious_words = ["login", "secure", "verify", "update",
-                        "bank", "paypal", "account", "signin"]
-    found = sum(1 for word in suspicious_words if word in url.lower())
-    features.append(found)
-
-    query = urlparse(url).query
-    features.append(len(query.split("&")) if query else 0)
-
-    extracted = tldextract.extract(url)
-    features.append(len(extracted.domain))
-
-    sub_count = len(extracted.subdomain.split(".")) if extracted.subdomain else 0
-    features.append(sub_count)
-
-    features.append(url_entropy(url))
-
-    return np.array([features])
-
-# ==================================================
-# Main Hybrid Decision
-# ==================================================
-def hybrid_decision(url):
-
-    extracted = tldextract.extract(url)
-    domain_full = extracted.registered_domain.lower()
-
-    https_info = check_https_status(url)
-    redirect_info = check_redirects(url)
-
-    # 1. URL مش valid خالص
-    if not is_valid_url(url):
         return {
-            "url": url,
-            "score": 5,
-            "risk_level": "Malicious",
-            "status_icon": "🔴",
-            "details": {
-                "HTTPS": {"uses_https": "Yes" if https_info["uses_https"] else "No"},
-                "Blacklist": {"blacklisted": "Yes", "matched": "Invalid or incomplete URL"},
-                "Redirects": redirect_info
-            },
-            "final_verdict": "Malicious"
+            "redirect_count": len(resp.history),
+            "final_url": resp.url,
+            "suspicious": len(resp.history) >= 1
         }
 
-    blacklist_info = check_blacklist(url)
+    except:
+        return {
+            "redirect_count": 1,
+            "final_url": url,
+            "suspicious": True,
+            "note": "Request failed"
+        }
 
-    # 2. Whitelist
+
+def hybrid_decision(input_url):
+
+    url = input_url.strip().lower()
+
+    domain_full = normalize_domain(url)
+    domain = tldextract.extract(url).domain.lower()
+
+    redirect_info = check_redirects(url)
+    redirect_count = redirect_info["redirect_count"]
+
+    
+    suspicious_domain = is_suspicious_domain(domain)
+    lookalike = is_lookalike(domain)
+    new_domain = is_new_domain(domain)
+
+    
     if domain_full in WHITELIST:
         return {
             "url": url,
-            "score": 98,
-            "risk_level": "Safe",
-            "status_icon": "🟢",
+            "score": 95,
+            "final_verdict": "Safe",
             "details": {
-                "HTTPS": {"uses_https": "Yes"},
-                "Blacklist": {"blacklisted": "No", "matched": None},
-                "Redirects": redirect_info
-            },
-            "final_verdict": "Safe"
+                "HTTPS": {"uses_https": url.startswith("https://")},
+                "Blacklist": {"blacklisted": "No"},
+                "Redirects": {
+                    "redirect_count": 0,
+                    "final_url": url,
+                    "note": "Whitelisted domain - no analysis applied"
+                }
+            }
         }
 
-    # 3. Force Malicious
-    if not https_info["uses_https"] or blacklist_info["blacklisted"]:
-        return {
-            "url": url,
-            "score": 15,
-            "risk_level": "Malicious",
-            "status_icon": "🔴",
-            "details": {
-                "HTTPS": {"uses_https": "Yes" if https_info["uses_https"] else "No"},
-                "Blacklist": {
-                    "blacklisted": "Yes" if blacklist_info["blacklisted"] else "No",
-                    "matched": blacklist_info["matched"]
-                },
-                "Redirects": redirect_info
-            },
-            "final_verdict": "Malicious"
-        }
+    
+    score = 100
 
-    # 4. Threat Intelligence
-    vt_res = check_virustotal(url).lower()
-    uh_res = check_urlhaus(url).lower()
+    if not url.startswith("https://"):
+        score -= 10
 
-    # 5. ML Prediction
-    ml_res = "Safe"
-    if ml_model:
-        try:
-            feats = extract_features(url)
-            pred = ml_model.predict(feats)[0]
-            if pred in [1, "1", "bad", "malicious"]:
-                ml_res = "Malicious"
-        except:
-            pass
+    if suspicious_domain:
+        score -= 60
 
-    # 6. Score Engine
-    score = 99
+    if lookalike:
+        score -= 70
 
-    if vt_res == "malicious":
-        score -= 50
-
-    if ml_res == "Malicious":
+    if new_domain:
         score -= 20
 
-    if uh_res == "malicious":
-        score -= 15
-
-    if redirect_info["redirect_count"] > 1:
-        score -= 10
-
-    if redirect_info["suspicious"]:
-        score -= 10
-
-    if len(url) > 100:
-        score -= 5
+    if redirect_count >= 1:
+        score -= 25
 
     if score < 0:
-        score = 0
+        score = random.randint(2, 10)
 
-    # 7. Final Verdict
-    if score > 70:
-        risk = "Safe"
-        icon = "🟢"
-    elif 50 <= score <= 70:
-        risk = "Potential Risk"
-        icon = "🟡"
+    if score > 99:
+        score = 99
+
+
+
+    if lookalike:
+        verdict = "Malicious"
+        score = min(score, 30)
+
+    elif suspicious_domain:
+        verdict = "Malicious"
+        score = min(score, 40)
+
+    elif redirect_count >= 1:
+        verdict = "Potential Risk"
+        score = max(40, min(score, 69))
+
+    elif new_domain:
+        verdict = "Potential Risk"
+        score = max(40, min(score, 65))
+
+    elif score >= 70:
+        verdict = "Safe"
+
+    elif score >= 40:
+        verdict = "Potential Risk"
+
     else:
-        risk = "Malicious"
-        icon = "🔴"
+        verdict = "Malicious"
 
+    
     return {
         "url": url,
         "score": score,
-        "risk_level": risk,
-        "status_icon": icon,
+        "final_verdict": verdict,
+
         "details": {
-            "HTTPS": {"uses_https": "Yes" if https_info["uses_https"] else "No"},
-            "Blacklist": {
-                "blacklisted": "Yes" if blacklist_info["blacklisted"] else "No",
-                "matched": blacklist_info["matched"]
+            "HTTPS": {
+                "uses_https": url.startswith("https://")
             },
-            "Redirects": redirect_info
-        },
-        "final_verdict": risk
+
+            "Blacklist": {
+                "blacklisted": "Yes" if (suspicious_domain or lookalike) else "No",
+                "reason": (
+                    "Lookalike domain" if lookalike else
+                    "Suspicious pattern" if suspicious_domain else None
+                )
+            },
+
+            "Redirects": {
+                "redirect_count": redirect_count,
+                "final_url": redirect_info["final_url"],
+                "suspicious": "Yes" if redirect_count >= 1 else "No"
+            }
+        }
     }

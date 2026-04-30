@@ -15,8 +15,11 @@ test_groups = {
         "http://ama-zone-security-update.com/login",
         "https://tinyurl.com/2p9d4x7a",
         "https://cutt.ly/testlink",
-         "https://rebrand.ly/example",
-         "https://bit.ly/3xY8zK9"
+         "https://rebrand.ly/example.txt",
+         "https://hfhgbjyihnioj.com",
+         "https://gftdg4.org"
+         ,"https://Go0gle.com"
+         ,"https://yghdtr.com"
 
     ]
 }
